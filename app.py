@@ -3,7 +3,6 @@ import requests
 import folium
 import pandas as pd
 import streamlit.components.v1 as components
-from folium.plugins import MarkerCluster
 
 st.set_page_config(page_title="주소 변환 및 위치 비교 툴", page_icon="📍", layout="wide")
 
@@ -22,12 +21,16 @@ with st.sidebar:
     st.write("---")
     radius_km = st.slider("🔴 검색 위치 반경 설정 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
 
-# 띠/문양 없는 완전한 깔끔 단색 SVG 핀 생성 함수
-def get_clean_pin(color_hex):
+# 기본 사이즈를 대폭(절반) 줄인 핀 생성 함수
+def get_clean_pin(color_hex, is_search=False):
+    # 일반 매장 6x9 (매우 작음), 검색 위치 10x14
+    w, h = (10, 14) if is_search else (6, 9)
     svg = f'''
-    <svg width="28" height="40" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="{color_hex}"/>
-    </svg>
+    <div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;">
+        <svg width="{w}" height="{h}" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="{color_hex}"/>
+        </svg>
+    </div>
     '''
     return svg
 
@@ -100,21 +103,20 @@ else:
 
 m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level)
 
-# 1. 기존 매장 마커 (띠 없는 깔끔한 하늘색 핀: #38BDF8)
-marker_cluster = MarkerCluster().add_to(m)
+# 1. 기존 매장 마커 (그룹화 제거 -> 개별 마커로 지도에 직접 추가)
 for _, row in stores_df.iterrows():
     folium.Marker(
         location=[row['lat'], row['lng']],
         popup=f"<b>{row['name']}</b>",
         tooltip=f"기존 매장: {row['name']}",
         icon=folium.DivIcon(
-            html=get_clean_pin('#38BDF8'), # 하늘색
-            icon_size=(28, 40),
-            icon_anchor=(14, 40)
+            html=get_clean_pin('#38BDF8', is_search=False),
+            icon_size=(6, 9),
+            icon_anchor=(3, 9) # 뾰족한 끝이 좌표에 정확히 맞도록 앵커 설정
         )
-    ).add_to(marker_cluster)
+    ).add_to(m)
 
-# 2. 검색 위치 마커 (띠 없는 깔끔한 연한 붉은색 핀: #F87171) + 반경 원
+# 2. 검색 위치 마커 + 반경 원
 if search_lat and search_lng:
     folium.Circle(
         location=[search_lat, search_lng],
@@ -131,10 +133,39 @@ if search_lat and search_lng:
         popup=f"<b>[검색 위치]</b><br>{address}",
         tooltip=f"검색 위치: {address}",
         icon=folium.DivIcon(
-            html=get_clean_pin('#F87171'), # 연한 붉은색
-            icon_size=(32, 44),
-            icon_anchor=(16, 44)
+            html=get_clean_pin('#F87171', is_search=True),
+            icon_size=(10, 14),
+            icon_anchor=(5, 14)
         )
     ).add_to(m)
 
-components.html(m._repr_html_(), height=580)
+# 지도 줌/아웃 시 마커 크기가 자동 연동되는 자바스크립트 주입 (스케일 수치 재조정)
+zoom_script = """
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    var checkExist = setInterval(function() {
+        var mapElement = document.querySelector('.folium-map');
+        if (mapElement && mapElement._leaflet_map) {
+            var map = mapElement._leaflet_map;
+            clearInterval(checkExist);
+            
+            function adjustMarkerScale() {
+                var zoom = map.getZoom();
+                // 전국 지도(Zoom 7)에서는 0.8배, 동네 지도(Zoom 16+)에서는 최대 3.5배까지 동적으로 커짐
+                var scale = Math.max(0.8, Math.min(3.5, 0.8 + (zoom - 7) * 0.25));
+                var pins = document.querySelectorAll('.custom-pin-icon');
+                pins.forEach(function(pin) {
+                    pin.style.transform = 'scale(' + scale + ')';
+                });
+            }
+            
+            map.on('zoomend', adjustMarkerScale);
+            adjustMarkerScale();
+        }
+    }, 100);
+});
+</script>
+"""
+
+map_html = m._repr_html_() + zoom_script
+components.html(map_html, height=580)
