@@ -21,10 +21,9 @@ with st.sidebar:
     st.write("---")
     radius_km = st.slider("🔴 검색 위치 반경 설정 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
 
-# 기본 사이즈를 대폭(절반) 줄인 핀 생성 함수
+# 요청하신 2배 확대된 사이즈 적용 (기존 6x9 -> 12x18 / 검색위치 10x14 -> 20x28)
 def get_clean_pin(color_hex, is_search=False):
-    # 일반 매장 6x9 (매우 작음), 검색 위치 10x14
-    w, h = (10, 14) if is_search else (6, 9)
+    w, h = (20, 28) if is_search else (12, 18)
     svg = f'''
     <div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;">
         <svg width="{w}" height="{h}" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">
@@ -103,16 +102,16 @@ else:
 
 m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level)
 
-# 1. 기존 매장 마커 (그룹화 제거 -> 개별 마커로 지도에 직접 추가)
+# 1. 기존 매장 마커 (그룹화 없는 개별 마커 배치)
 for _, row in stores_df.iterrows():
     folium.Marker(
         location=[row['lat'], row['lng']],
         popup=f"<b>{row['name']}</b>",
         tooltip=f"기존 매장: {row['name']}",
         icon=folium.DivIcon(
-            html=get_clean_pin('#38BDF8', is_search=False),
-            icon_size=(6, 9),
-            icon_anchor=(3, 9) # 뾰족한 끝이 좌표에 정확히 맞도록 앵커 설정
+            html=get_clean_pin('#38BDF8', is_search=False), # 하늘색
+            icon_size=(12, 18),
+            icon_anchor=(6, 18) # 핀 끝부분이 정확한 좌표를 가리키도록 중심점 셋팅
         )
     ).add_to(m)
 
@@ -133,39 +132,42 @@ if search_lat and search_lng:
         popup=f"<b>[검색 위치]</b><br>{address}",
         tooltip=f"검색 위치: {address}",
         icon=folium.DivIcon(
-            html=get_clean_pin('#F87171', is_search=True),
-            icon_size=(10, 14),
-            icon_anchor=(5, 14)
+            html=get_clean_pin('#F87171', is_search=True), # 연한 붉은색
+            icon_size=(20, 28),
+            icon_anchor=(10, 28)
         )
     ).add_to(m)
 
-# 지도 줌/아웃 시 마커 크기가 자동 연동되는 자바스크립트 주입 (스케일 수치 재조정)
+# [핵심 수정] 외부가 아닌 지도 객체 '내부'에 자바스크립트를 직접 삽입하여 완벽 연동
 zoom_script = """
 <script>
 document.addEventListener("DOMContentLoaded", function() {
-    var checkExist = setInterval(function() {
-        var mapElement = document.querySelector('.folium-map');
-        if (mapElement && mapElement._leaflet_map) {
-            var map = mapElement._leaflet_map;
-            clearInterval(checkExist);
+    setTimeout(function() {
+        // 화면 안의 지도 객체를 직접 찾아내기
+        var map_keys = Object.keys(window).filter(k => k.startsWith('map_'));
+        if (map_keys.length > 0) {
+            var myMap = window[map_keys[0]];
             
             function adjustMarkerScale() {
-                var zoom = map.getZoom();
-                // 전국 지도(Zoom 7)에서는 0.8배, 동네 지도(Zoom 16+)에서는 최대 3.5배까지 동적으로 커짐
-                var scale = Math.max(0.8, Math.min(3.5, 0.8 + (zoom - 7) * 0.25));
+                var zoom = myMap.getZoom();
+                // 줌 레벨 11일 때 기본 크기(1.0배), 확대 시 최대 3배 커지고, 축소 시 0.4배까지 작아짐
+                var scale = Math.max(0.4, Math.min(3.0, 1.0 + (zoom - 11) * 0.25));
+                
                 var pins = document.querySelectorAll('.custom-pin-icon');
                 pins.forEach(function(pin) {
                     pin.style.transform = 'scale(' + scale + ')';
                 });
             }
             
-            map.on('zoomend', adjustMarkerScale);
-            adjustMarkerScale();
+            // 지도 줌(확대/축소) 이벤트가 끝날 때마다 크기 조절 함수 실행
+            myMap.on('zoomend', adjustMarkerScale);
+            adjustMarkerScale(); // 최초 로딩 시에도 즉시 1회 적용
         }
-    }, 100);
+    }, 500);
 });
 </script>
 """
+m.get_root().html.add_child(folium.Element(zoom_script))
 
-map_html = m._repr_html_() + zoom_script
-components.html(map_html, height=580)
+# 지도를 안전한 방식으로 렌더링
+components.html(m.get_root().render(), height=580)
