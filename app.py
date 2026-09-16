@@ -11,7 +11,9 @@ from shapely.geometry import shape, mapping
 from shapely.ops import transform
 import streamlit.components.v1 as components
 
+# ==========================================
 # 1. 페이지 및 모던 UI 설정
+# ==========================================
 st.set_page_config(page_title="신규 업체 입점 검토 및 상권 분석", page_icon="📍", layout="wide")
 
 st.markdown("""
@@ -26,7 +28,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 2. UTM-K(TM) -> WGS84 좌표 변환 함수
+# ==========================================
+# 2. 좌표 변환 및 유틸리티 함수
+# ==========================================
 def convert_coord(x, y, z=None):
     if 120.0 <= x <= 135.0 and 30.0 <= y <= 45.0: return (x, y, z) if z is not None else (x, y)
     if 30.0 <= x <= 45.0 and 120.0 <= y <= 135.0: return (y, x, z) if z is not None else (y, x)
@@ -54,6 +58,21 @@ def convert_coord(x, y, z=None):
 
     return (x, y, z) if z is not None else (x, y)
 
+def _only_digits(val):
+    if pd.isna(val): return ""
+    return re.sub(r'[^0-9]', '', str(val))
+
+def _extract_dong_name(text):
+    if not text or pd.isna(text): return ""
+    text = str(text).split('(')[0].strip()
+    text = text.replace('제', '')
+    tokens = text.split()
+    for t in reversed(tokens):
+        if t.endswith('동') or t.endswith('읍') or t.endswith('면'):
+            return t
+    m = re.search(r'([가-힣0-9]+(?:동|읍|면))', text)
+    return m.group(1) if m else text.replace(" ", "")
+
 def get_clean_pin(color_hex, is_search=False):
     w, h = (20, 28) if is_search else (12, 18)
     return f'''
@@ -64,9 +83,12 @@ def get_clean_pin(color_hex, is_search=False):
     </div>
     '''
 
-# 3. 정밀 정밀 데이터 로드 및 매칭
+# ==========================================
+# 3. 데이터 로드 (웹 통신 자동화)
+# ==========================================
 @st.cache_data
 def load_and_process_data():
+    # [1] 기존 시공점 데이터 로드
     df = pd.DataFrame()
     for enc in ['utf-8', 'euc-kr', 'cp949', 'latin-1']:
         try:
@@ -92,6 +114,7 @@ def load_and_process_data():
         df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
         df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
 
+    # [2] 인구 데이터 및 대한민국 표준 경계(웹 직접 다운로드) 매칭
     heat_points, simplified_geojson, matched_count = [], None, 0
     try:
         pop_df = pd.DataFrame()
@@ -102,7 +125,6 @@ def load_and_process_data():
             except: continue
             
         if not pop_df.empty:
-            # 스크린샷 기반 컬럼 자동 탐지 (행정동코드 / 인구수)
             code_c = next((c for c in pop_df.columns if '코드' in c or 'cd' in c.lower()), pop_df.columns[0])
             pop_c = next((c for c in pop_df.columns if '인구' in c or 'pop' in c.lower()), pop_df.columns[1])
 
@@ -111,20 +133,17 @@ def load_and_process_data():
 
             code_map_full = pop_df.groupby('code_clean')['pop_num'].sum().to_dict()
             code_map_7 = pop_df.groupby(pop_df['code_clean'].str[:7])['pop_num'].sum().to_dict()
+            code_map_8 = pop_df.groupby(pop_df['code_clean'].str[:8])['pop_num'].sum().to_dict()
 
-            # json / geojson 확장자 자동 선택
-            gj_filename = '행정동경계.json'
-            try:
-                with open(gj_filename, 'r', encoding='utf-8') as f: gj = json.load(f)
-            except:
-                with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
+            # 💡 [가장 중요한 변경점] 용량 문제 해결을 위해 공공 깃허브에서 표준 경계선을 다이렉트로 가져옵니다!
+            geo_url = "https://raw.githubusercontent.com/vuski/admdongkor/master/ver20230701/HangJeongDong_ver20230701.geojson"
+            gj = requests.get(geo_url).json()
 
             features, raw_points = [], []
             
             for idx, feat in enumerate(gj.get('features', [])):
                 props = feat.get('properties', {})
                 
-                # 속성 내 숫자 코드 정밀 탐색
                 digits = []
                 for k, v in props.items():
                     d = re.sub(r'[^0-9]', '', str(v))
@@ -135,6 +154,9 @@ def load_and_process_data():
                     if d in code_map_full:
                         matched_pop = code_map_full[d]
                         break
+                    elif d in code_map_8:
+                        matched_pop = code_map_8[d]
+                        break
                     elif d[:7] in code_map_7:
                         matched_pop = code_map_7[d[:7]]
                         break
@@ -144,7 +166,7 @@ def load_and_process_data():
 
                 try:
                     raw_geom = shape(feat['geometry'])
-                    # 좌표계 자동 정밀 변환
+                    # 가져온 파일은 이미 WGS84라 변환이 필요없어 훨씬 빠릅니다.
                     wgs_geom = transform(convert_coord, raw_geom) if not (120.0 <= raw_geom.centroid.x <= 135.0) else raw_geom
                     simple_geom = wgs_geom.simplify(0.001, preserve_topology=True)
                     centroid = wgs_geom.centroid
@@ -155,7 +177,7 @@ def load_and_process_data():
                     if matched_pop > 0: 
                         raw_points.append({'lat': centroid.y, 'lng': centroid.x, 'density': pop_density})
                         
-                    geo_title = str(props.get('ADM_NM', props.get('EMD_NM', f'행정동_{idx}')))
+                    geo_title = str(props.get('adm_nm', props.get('ADM_NM', f'행정동_{idx}')))
                     features.append({
                         'type': 'Feature', 
                         'properties': {
@@ -180,11 +202,13 @@ def load_and_process_data():
         
     return df, heat_points, simplified_geojson, matched_count
 
-with st.spinner("빅데이터 연산 및 지도 최적화 중입니다..."):
+with st.spinner("최초 1회 빅데이터(전국망) 다운로드 및 분석 중입니다. (약 10~20초 소요)"):
     stores_df, heat_points, geojson_data, matched_count = load_and_process_data()
 
-# 4. UI 레이아웃
-st.title("신규 입점 검토 시스템")
+# ==========================================
+# 4. 앱 UI 및 사이드바
+# ==========================================
+st.title("📍 상권 기반 신규 입점 검토 시스템")
 st.caption("인구 밀집 히트맵을 참고하여 신규 주소를 검색하고 기존 매장과의 상권을 비교하세요.")
 
 with st.sidebar:
@@ -198,7 +222,7 @@ with st.sidebar:
     if matched_count > 0: 
         st.info(f"🔥 행정동 인구 매칭 성공: {matched_count}곳")
     else:
-        st.warning("⚠️ 인구 데이터 연동 확인 중")
+        st.warning("⚠️ 인구 데이터 연동 실패 (csv 파일을 확인해주세요)")
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
@@ -227,7 +251,9 @@ if search_clicked:
                 with c2: st.markdown("**경도**"); st.code(f"{search_lng:.6f}", language="text")
             else: st.error("주소를 찾을 수 없습니다.")
 
-# 5. 지도 렌더링
+# ==========================================
+# 5. 지도 생성 및 레이어 병합
+# ==========================================
 st.markdown("<br>", unsafe_allow_html=True)
 
 center_lat = search_lat if search_lat else (stores_df['lat'].mean() if not stores_df.empty else 37.5665)
