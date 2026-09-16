@@ -29,7 +29,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 복잡한 좌표 변환 함수 (기존 로직 유지)
+# 2. 복잡한 좌표 변환 함수
 # ==========================================
 def convert_coord(x, y, z=None):
     if 120.0 <= x <= 135.0 and 30.0 <= y <= 45.0: return (x, y, z) if z is not None else (x, y)
@@ -64,19 +64,36 @@ def _extract_dong_name(text):
     m = re.search(r'([가-힣0-9]+(?:동|읍|면)(?:[0-9]*가)?)', str(text).strip())
     return m.group(1) if m else str(text).strip()
 
+def get_clean_pin(color_hex, is_search=False):
+    w, h = (20, 28) if is_search else (12, 18)
+    svg = f'''
+    <div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;">
+        <svg width="{w}" height="{h}" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="{color_hex}"/>
+        </svg>
+    </div>
+    '''
+    return svg
+
 # ==========================================
-# 3. 데이터 로드 및 캐싱 (서버 과부하 방지)
+# 3. 데이터 로드 및 캐싱
 # ==========================================
 @st.cache_data
 def load_and_process_data():
-    # 1. 시공점 데이터 로드
     df = pd.DataFrame()
-    for enc in ['utf-8', 'euc-kr', 'cp949', 'utf-16', 'latin-1']:
+    for enc in ['utf-8', 'euc-kr', 'cp949', 'utf-16', 'latin-1', 'utf-8-sig']:
         try:
             df = pd.read_csv('시공점.csv', encoding=enc)
             break
         except: continue
         
+    if df.empty:
+        for enc in ['utf-8', 'euc-kr', 'cp949']:
+            try:
+                df = pd.read_csv('stores.csv', encoding=enc)
+                break
+            except: continue
+
     if not df.empty:
         col_map = {'업체코드':'code', '업체명':'name', '위도':'lat', '경도':'lng', '월평균 예약 수':'avg_monthly_reservations', '월평균예약수':'avg_monthly_reservations', '재구매율':'repurchase_rate', '익일배송여부':'next_day_delivery', '활성 여부':'is_active', '활성여부':'is_active'}
         df = df.rename(columns=col_map)
@@ -86,53 +103,86 @@ def load_and_process_data():
         df['code'] = df.get('code', '없음').fillna('없음').astype(str)
         df['name'] = df.get('name', '없음').fillna('없음').astype(str)
         df['is_active'] = df.get('is_active', 'Y').fillna('Y').astype(str).str.upper()
-        df['next_day_delivery'] = df.get('next_day_delivery', 'N').fillna('N').astype(str).str.upper()
         df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace('%', ''), errors='coerce').fillna(0)
 
-    # 2. 공간 및 인구 데이터 파싱
     heat_points, simplified_geojson = [], None
     try:
-        try: pop_df = pd.read_csv('인구.csv', encoding='utf-8')
-        except: pop_df = pd.read_csv('인구.csv', encoding='euc-kr')
-        
-        pop_col = [c for c in pop_df.columns if '인구' in c]
-        p_col = pop_col[0] if pop_col else pop_df.columns[1]
-        pop_df['population'] = pd.to_numeric(pop_df[p_col], errors='coerce').fillna(0)
-        pop_df['short_dong'] = pop_df.iloc[:, 0].apply(_extract_dong_name)
-        short_dong_map = pop_df.groupby('short_dong')['population'].sum().to_dict()
-
-        with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
-        features, raw_points = [], []
-        
-        for idx, feat in enumerate(gj['features']):
-            props = feat.get('properties', {})
-            geo_name = props.get('ADM_NM', props.get('EMD_NM', props.get('dong', '')))
-            short_geo_dong = _extract_dong_name(geo_name)
-            matched_pop = short_dong_map.get(short_geo_dong, 0)
-            
+        pop_df = pd.DataFrame()
+        for enc in ['utf-8', 'utf-8-sig', 'euc-kr', 'cp949']:
             try:
-                raw_geom = shape(feat['geometry'])
-                wgs_geom = transform(convert_coord, raw_geom)
-                simple_geom = wgs_geom.simplify(0.001, preserve_topology=True)
-                centroid = wgs_geom.centroid
-                area_sq_km = max((raw_geom.area * 111.0 * 88.0) if 120.0 <= raw_geom.centroid.x <= 135.0 else (raw_geom.area / 1000000.0), 0.1)
-                pop_density = matched_pop / area_sq_km
-                
-                if matched_pop > 0: raw_points.append({'lat': centroid.y, 'lng': centroid.x, 'density': pop_density})
-                features.append({'type': 'Feature', 'properties': {'ADM_NM': geo_name, 'population': int(matched_pop), 'area_km2': round(area_sq_km, 2), 'density': int(pop_density)}, 'geometry': mapping(simple_geom)})
+                pop_df = pd.read_csv('인구.csv', encoding=enc)
+                break
             except: continue
             
-        if raw_points:
-            density_cutoff = np.percentile([p['density'] for p in raw_points], 50)
-            heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] >= density_cutoff]
-        simplified_geojson = {'type': 'FeatureCollection', 'features': features}
+        if not pop_df.empty:
+            pop_col = [c for c in pop_df.columns if '인구' in c]
+            name_col = [c for c in pop_df.columns if any(k in c for k in ['동', '명', '이름', '지역', '행정'])]
+            
+            p_col = pop_col[0] if pop_col else pop_df.columns[-1]
+            n_col = name_col[0] if name_col else pop_df.columns[0]
+
+            pop_df['population'] = pd.to_numeric(pop_df[p_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            pop_df['name_clean'] = pop_df[n_col].astype(str).str.replace(' ', '').str.strip()
+            pop_df['short_dong'] = pop_df[n_col].astype(str).apply(_extract_dong_name)
+            
+            full_name_map = pop_df.groupby('name_clean')['population'].sum().to_dict()
+            short_dong_map = pop_df.groupby('short_dong')['population'].sum().to_dict()
+
+            with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
+            features, raw_points = [], []
+            
+            for idx, feat in enumerate(gj.get('features', [])):
+                props = feat.get('properties', {})
+                geo_name = ""
+                for k in ['ADM_NM', 'adm_nm', 'EMD_NM', 'EMD_KOR_NM', 'dong', 'name', 'NAME']:
+                    if k in props and props[k]:
+                        geo_name = str(props[k]).strip()
+                        break
+                        
+                geo_name_clean = geo_name.replace(' ', '')
+                short_geo_dong = _extract_dong_name(geo_name)
+                
+                matched_pop = full_name_map.get(geo_name_clean, 0)
+                if matched_pop == 0:
+                    matched_pop = short_dong_map.get(short_geo_dong, 0)
+                    
+                try:
+                    raw_geom = shape(feat['geometry'])
+                    wgs_geom = transform(convert_coord, raw_geom)
+                    simple_geom = wgs_geom.simplify(0.001, preserve_topology=True)
+                    centroid = wgs_geom.centroid
+                    
+                    area_sq_km = max((raw_geom.area * 111.0 * 88.0) if 120.0 <= raw_geom.centroid.x <= 135.0 else (raw_geom.area / 1000000.0), 0.1)
+                    pop_density = matched_pop / area_sq_km
+                    
+                    if matched_pop > 0: 
+                        raw_points.append({'lat': centroid.y, 'lng': centroid.x, 'density': pop_density})
+                        
+                    features.append({
+                        'type': 'Feature', 
+                        'properties': {
+                            'ADM_NM': geo_name, 
+                            'population': int(matched_pop), 
+                            'area_km2': round(area_sq_km, 2), 
+                            'density': int(pop_density)
+                        }, 
+                        'geometry': mapping(simple_geom)
+                    })
+                except Exception as e:
+                    continue
+                    
+            if raw_points:
+                density_cutoff = np.percentile([p['density'] for p in raw_points], 50)
+                heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] >= density_cutoff]
+            
+            simplified_geojson = {'type': 'FeatureCollection', 'features': features}
     except Exception as e:
-        print("공간 데이터 로드 실패:", e)
+        print("공간 데이터 로드 오류:", e)
         
     return df, heat_points, simplified_geojson
 
-with st.spinner("빅데이터 연산 및 지도 최적화 중입니다... (최초 1회만 소요)"):
+with st.spinner("빅데이터 연산 및 지도 최적화 중입니다..."):
     stores_df, heat_points, geojson_data = load_and_process_data()
 
 # ==========================================
@@ -148,7 +198,7 @@ with st.sidebar:
     st.markdown("**🔴 신규 입점 검토 반경**")
     radius_km = st.slider("반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
     st.success(f"✅ 연동된 기존 시공점: {len(stores_df)}개")
-    if heat_points: st.info("🔥 인구 밀집 상권 히트맵 로드됨")
+    if heat_points: st.info("🔥 인구 밀집 상권 히트맵 로드 완료")
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
@@ -182,32 +232,31 @@ if search_clicked:
 # ==========================================
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 지도 중심 설정
 center_lat = search_lat if search_lat else (stores_df['lat'].mean() if not stores_df.empty else 37.5665)
 center_lng = search_lng if search_lng else (stores_df['lng'].mean() if not stores_df.empty else 126.9780)
 zoom_level = 14 if search_lat and radius_km <= 2 else (13 if search_lat and radius_km <= 5 else 11)
 
 m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level, tiles='OpenStreetMap')
 
-# [기존 기능 1] 인구 밀집 히트맵 레이어
+# 히트맵
 if heat_points:
     HeatMap(heat_points, name='🔥 주요 인구 밀집 스팟', radius=14, blur=10, min_opacity=0.35,
             gradient={0.3: '#00E676', 0.6: '#FFEB3B', 0.85: '#FF9800', 1.0: '#D50000'}, show=True).add_to(m)
 
-# [기존 기능 2] 행정동 경계선 레이어
+# 행정동 경계
 if geojson_data:
     folium.GeoJson(
         geojson_data, name='🗺️ 행정동 경계선 (인구/면적)',
         style_function=lambda f: {'fillColor': 'transparent', 'color': '#777777', 'weight': 0.5, 'fillOpacity': 0.0},
         highlight_function=lambda f: {'color': '#000000', 'weight': 1.8, 'fillOpacity': 0.1},
         tooltip=folium.GeoJsonTooltip(fields=['ADM_NM', 'population', 'density'], aliases=['행정동:', '인구수:', '인구밀도:'], localize=True),
-        show=False # 초기에는 숨김 처리 (우측 상단 레이어 툴에서 켤 수 있음)
+        show=False
     ).add_to(m)
 
-# [기존 기능 3] 반경별 시공점 커버리지 레이어 (사용자가 만든 3, 5, 10, 15km 레이어)
+# 커버리지 반경 원
 radii = [3, 5, 10, 15]
 for r_km in radii:
-    is_default = (r_km == 5) # 기본 5km만 켜둠
+    is_default = (r_km == 5)
     radius_layer = folium.FeatureGroup(name=f'🎯 기존 시공점 커버리지 ({r_km}km)', show=is_default)
     for _, row in stores_df.iterrows():
         is_active = row['is_active'] == 'Y'
@@ -218,29 +267,36 @@ for r_km in radii:
         ).add_to(radius_layer)
     radius_layer.add_to(m)
 
-# [기존 기능 4] 개별 매장 마커 및 상세 팝업 레이어
+# 📍 [업체 마커 레이어] - 요청한 4가지 핵심 정보 팝업 카드 적용
 shop_layer = folium.FeatureGroup(name=f'📍 전체 매장 마커', show=True)
 for _, row in stores_df.iterrows():
-    is_active, is_next_day = row['is_active'] == 'Y', row['next_day_delivery'] == 'Y'
-    color = '#0D47A1' if is_next_day else '#0288D1' if is_active else '#9E9E9E'
-    
     popup_html = f"""
-    <div style="font-family:'Malgun Gothic',sans-serif;min-width:200px;">
-        <h4 style="margin:0 0 8px 0;border-bottom:2px solid {color};">📍 {row['name']}</h4>
-        <p style="margin:3px 0;font-size:12px;"><b>업체코드:</b> {row['code']}</p>
-        <p style="margin:3px 0;font-size:12px;"><b>월 평균 예약:</b> {row['avg_monthly_reservations']:,.0f}건</p>
-        <p style="margin:3px 0;font-size:12px;"><b>재구매율:</b> {row['repurchase_rate']:.1f}%</p>
-        <p style="margin:3px 0;font-size:12px;"><b>상태:</b> {'활성(Y)' if is_active else '비활성(N)'}</p>
+    <div style="font-family:'Pretendard', sans-serif; min-width:190px; padding: 4px;">
+        <h4 style="margin:0 0 8px 0; color:#1E3A8A; font-size:14px; font-weight:700; border-bottom:2px solid #38BDF8; padding-bottom:5px;">
+            📍 {row['name']}
+        </h4>
+        <div style="font-size:12px; color:#374151; line-height:1.6;">
+            <p style="margin:3px 0;"><b>• 업체코드:</b> <span style="color:#111827;">{row['code']}</span></p>
+            <p style="margin:3px 0;"><b>• 업체명:</b> <span style="color:#111827;">{row['name']}</span></p>
+            <p style="margin:3px 0;"><b>• 월평균 예약 수:</b> <span style="color:#2563EB; font-weight:600;">{row['avg_monthly_reservations']:,.0f}건</span></p>
+            <p style="margin:3px 0;"><b>• 재구매율:</b> <span style="color:#059669; font-weight:600;">{row['repurchase_rate']:.1f}%</span></p>
+        </div>
     </div>
     """
-    folium.CircleMarker(
-        location=[row['lat'], row['lng']], radius=4.5, popup=folium.Popup(popup_html, max_width=250),
-        color='#FFFFFF', fill=True, fillColor=color, fillOpacity=0.95, weight=1.0,
-        tooltip=f"{row['name']}"
+    
+    folium.Marker(
+        location=[row['lat'], row['lng']],
+        popup=folium.Popup(popup_html, max_width=260),
+        tooltip=f"{row['name']} ({row['code']})",
+        icon=folium.DivIcon(
+            html=get_clean_pin('#38BDF8', is_search=False),
+            icon_size=(12, 18),
+            icon_anchor=(6, 18)
+        )
     ).add_to(shop_layer)
 shop_layer.add_to(m)
 
-# [신규 기능] 카카오 검색 위치 동적 마커 및 반경 원 (가장 위에 띄움)
+# 검색 위치 마커
 if search_lat and search_lng:
     search_layer = folium.FeatureGroup(name=f'🚨 신규 입점 검토 위치', show=True)
     folium.Circle(
@@ -248,17 +304,15 @@ if search_lat and search_lng:
         color='#DC2626', fill=True, fillColor='#EF4444', fillOpacity=0.2, weight=2.5
     ).add_to(search_layer)
 
-    svg_pin = '''<div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;"><svg width="24" height="34" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg"><path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="#DC2626"/></svg></div>'''
+    svg_pin = get_clean_pin('#DC2626', is_search=True)
     folium.Marker(
         location=[search_lat, search_lng], popup=f"<b>신규 검토 위치</b><br>{address}", tooltip=f"검토 반경: {radius_km}km",
-        icon=folium.DivIcon(html=svg_pin, icon_size=(24, 34), icon_anchor=(12, 34))
+        icon=folium.DivIcon(html=svg_pin, icon_size=(20, 28), icon_anchor=(10, 28))
     ).add_to(search_layer)
     search_layer.add_to(m)
 
-# 레이어 컨트롤 추가 (체크박스로 레이어 켜고 끄기 가능)
 folium.LayerControl(collapsed=False, position='topright').add_to(m)
 
-# 신규 마커 줌 연동 스크립트
 zoom_script = """
 <script>
 document.addEventListener("DOMContentLoaded", function() { setTimeout(function() {
