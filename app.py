@@ -58,11 +58,17 @@ def convert_coord(x, y, z=None):
 
     return (x, y, z) if z is not None else (x, y)
 
-def _clean_str(val): return "" if pd.isna(val) else str(val).split('.')[0].strip()
+# 초강력 이름 추출기: 괄호 제거, '제' 글자 제거, 끝단어 '동/읍/면'만 정확히 파싱
 def _extract_dong_name(text):
-    if not text: return ""
-    m = re.search(r'([가-힣0-9]+(?:동|읍|면)(?:[0-9]*가)?)', str(text).strip())
-    return m.group(1) if m else str(text).strip()
+    if not text or pd.isna(text): return ""
+    text = str(text).split('(')[0].strip()
+    text = text.replace('제', '') # '제1동' -> '1동'으로 통일
+    tokens = text.split()
+    for t in reversed(tokens):
+        if t.endswith('동') or t.endswith('읍') or t.endswith('면'):
+            return t
+    m = re.search(r'([가-힣0-9]+(?:동|읍|면))', text)
+    return m.group(1) if m else text.replace(" ", "")
 
 def get_clean_pin(color_hex, is_search=False):
     w, h = (20, 28) if is_search else (12, 18)
@@ -76,10 +82,11 @@ def get_clean_pin(color_hex, is_search=False):
     return svg
 
 # ==========================================
-# 3. 데이터 로드 및 캐싱
+# 3. 데이터 로드 및 캐싱 (매칭 알고리즘 강화)
 # ==========================================
 @st.cache_data
 def load_and_process_data():
+    # [1] 시공점 데이터 로드
     df = pd.DataFrame()
     for enc in ['utf-8', 'euc-kr', 'cp949', 'utf-16', 'latin-1', 'utf-8-sig']:
         try:
@@ -102,11 +109,11 @@ def load_and_process_data():
         df = df.dropna(subset=['lat', 'lng']).reset_index(drop=True)
         df['code'] = df.get('code', '없음').fillna('없음').astype(str)
         df['name'] = df.get('name', '없음').fillna('없음').astype(str)
-        df['is_active'] = df.get('is_active', 'Y').fillna('Y').astype(str).str.upper()
-        df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace('%', ''), errors='coerce').fillna(0)
+        df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
+        df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
 
-    heat_points, simplified_geojson = [], None
+    # [2] 인구 및 지도 데이터 매칭
+    heat_points, simplified_geojson, matched_count = [], None, 0
     try:
         pop_df = pd.DataFrame()
         for enc in ['utf-8', 'utf-8-sig', 'euc-kr', 'cp949']:
@@ -116,14 +123,15 @@ def load_and_process_data():
             except: continue
             
         if not pop_df.empty:
+            # 컬럼 자동 찾기
             pop_col = [c for c in pop_df.columns if '인구' in c]
             name_col = [c for c in pop_df.columns if any(k in c for k in ['동', '명', '이름', '지역', '행정'])]
-            
             p_col = pop_col[0] if pop_col else pop_df.columns[-1]
             n_col = name_col[0] if name_col else pop_df.columns[0]
 
-            pop_df['population'] = pd.to_numeric(pop_df[p_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            pop_df['name_clean'] = pop_df[n_col].astype(str).str.replace(' ', '').str.strip()
+            # 쉼표, '명' 글자 등 숫자 외의 모든 것 제거 후 숫자로 변환
+            pop_df['population'] = pd.to_numeric(pop_df[p_col].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
+            pop_df['name_clean'] = pop_df[n_col].astype(str).str.split('(').str[0].str.replace(' ', '').str.replace('제', '').str.strip()
             pop_df['short_dong'] = pop_df[n_col].astype(str).apply(_extract_dong_name)
             
             full_name_map = pop_df.groupby('name_clean')['population'].sum().to_dict()
@@ -135,17 +143,26 @@ def load_and_process_data():
             for idx, feat in enumerate(gj.get('features', [])):
                 props = feat.get('properties', {})
                 geo_name = ""
-                for k in ['ADM_NM', 'adm_nm', 'EMD_NM', 'EMD_KOR_NM', 'dong', 'name', 'NAME']:
+                for k in ['ADM_NM', 'adm_nm', 'EMD_NM', 'EMD_KOR_NM', 'dong', 'name', 'NAME', 'adm_dr_nm']:
                     if k in props and props[k]:
                         geo_name = str(props[k]).strip()
                         break
                         
-                geo_name_clean = geo_name.replace(' ', '')
+                geo_name_clean = geo_name.split('(')[0].replace(' ', '').replace('제', '')
                 short_geo_dong = _extract_dong_name(geo_name)
                 
+                # 3단계 초강력 매칭 (풀네임 -> 약어 -> 포함 여부 검색)
                 matched_pop = full_name_map.get(geo_name_clean, 0)
                 if matched_pop == 0:
                     matched_pop = short_dong_map.get(short_geo_dong, 0)
+                if matched_pop == 0:
+                    for k, v in short_dong_map.items():
+                        if k and len(k) > 1 and (k in short_geo_dong or short_geo_dong in k):
+                            matched_pop = v
+                            break
+                            
+                if matched_pop > 0:
+                    matched_count += 1
                     
                 try:
                     raw_geom = shape(feat['geometry'])
@@ -173,17 +190,17 @@ def load_and_process_data():
                     continue
                     
             if raw_points:
-                density_cutoff = np.percentile([p['density'] for p in raw_points], 50)
-                heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] >= density_cutoff]
+                # 0보다 큰 인구밀도는 모두 히트맵 포인트로 전달 (히트맵이 자체적으로 렌더링)
+                heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] > 0]
             
             simplified_geojson = {'type': 'FeatureCollection', 'features': features}
     except Exception as e:
         print("공간 데이터 로드 오류:", e)
         
-    return df, heat_points, simplified_geojson
+    return df, heat_points, simplified_geojson, matched_count
 
 with st.spinner("빅데이터 연산 및 지도 최적화 중입니다..."):
-    stores_df, heat_points, geojson_data = load_and_process_data()
+    stores_df, heat_points, geojson_data, matched_count = load_and_process_data()
 
 # ==========================================
 # 4. 앱 UI 및 사이드바
@@ -198,7 +215,12 @@ with st.sidebar:
     st.markdown("**🔴 신규 입점 검토 반경**")
     radius_km = st.slider("반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
     st.success(f"✅ 연동된 기존 시공점: {len(stores_df)}개")
-    if heat_points: st.info("🔥 인구 밀집 상권 히트맵 로드 완료")
+    
+    # 히트맵 로드 성공 여부 표시 강화
+    if heat_points and matched_count > 0: 
+        st.info(f"🔥 행정동 인구 매칭 성공: {matched_count}곳")
+    else:
+        st.warning("⚠️ 인구 데이터와 지도 매칭 실패 (히트맵 생성 불가)")
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
@@ -238,7 +260,7 @@ zoom_level = 14 if search_lat and radius_km <= 2 else (13 if search_lat and radi
 
 m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level, tiles='OpenStreetMap')
 
-# 히트맵
+# 히트맵 (기준값을 완화하여 0보다 큰 인구밀도는 모두 렌더링)
 if heat_points:
     HeatMap(heat_points, name='🔥 주요 인구 밀집 스팟', radius=14, blur=10, min_opacity=0.35,
             gradient={0.3: '#00E676', 0.6: '#FFEB3B', 0.85: '#FF9800', 1.0: '#D50000'}, show=True).add_to(m)
@@ -249,7 +271,7 @@ if geojson_data:
         geojson_data, name='🗺️ 행정동 경계선 (인구/면적)',
         style_function=lambda f: {'fillColor': 'transparent', 'color': '#777777', 'weight': 0.5, 'fillOpacity': 0.0},
         highlight_function=lambda f: {'color': '#000000', 'weight': 1.8, 'fillOpacity': 0.1},
-        tooltip=folium.GeoJsonTooltip(fields=['ADM_NM', 'population', 'density'], aliases=['행정동:', '인구수:', '인구밀도:'], localize=True),
+        tooltip=folium.GeoJsonTooltip(fields=['ADM_NM', 'population', 'density'], aliases=['행정동:', '인구수:', '인구밀도(명/km²):'], localize=True),
         show=False
     ).add_to(m)
 
@@ -259,7 +281,7 @@ for r_km in radii:
     is_default = (r_km == 5)
     radius_layer = folium.FeatureGroup(name=f'🎯 기존 시공점 커버리지 ({r_km}km)', show=is_default)
     for _, row in stores_df.iterrows():
-        is_active = row['is_active'] == 'Y'
+        is_active = row.get('is_active', 'Y') == 'Y'
         folium.Circle(
             location=[row['lat'], row['lng']], radius=r_km * 1000,
             color='#0288D1' if is_active else '#9E9E9E', fill=True, 
@@ -267,7 +289,7 @@ for r_km in radii:
         ).add_to(radius_layer)
     radius_layer.add_to(m)
 
-# 📍 [업체 마커 레이어] - 요청한 4가지 핵심 정보 팝업 카드 적용
+# 📍 [업체 마커 레이어] - 팝업 카드 적용
 shop_layer = folium.FeatureGroup(name=f'📍 전체 매장 마커', show=True)
 for _, row in stores_df.iterrows():
     popup_html = f"""
@@ -278,7 +300,7 @@ for _, row in stores_df.iterrows():
         <div style="font-size:12px; color:#374151; line-height:1.6;">
             <p style="margin:3px 0;"><b>• 업체코드:</b> <span style="color:#111827;">{row['code']}</span></p>
             <p style="margin:3px 0;"><b>• 업체명:</b> <span style="color:#111827;">{row['name']}</span></p>
-            <p style="margin:3px 0;"><b>• 월평균 예약 수:</b> <span style="color:#2563EB; font-weight:600;">{row['avg_monthly_reservations']:,.0f}건</span></p>
+            <p style="margin:3px 0;"><b>• 예약 수:</b> <span style="color:#2563EB; font-weight:600;">{row['avg_monthly_reservations']:,.0f}건</span></p>
             <p style="margin:3px 0;"><b>• 재구매율:</b> <span style="color:#059669; font-weight:600;">{row['repurchase_rate']:.1f}%</span></p>
         </div>
     </div>
