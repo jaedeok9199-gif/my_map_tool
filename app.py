@@ -1,229 +1,280 @@
 import streamlit as st
 import requests
 import folium
+from folium.plugins import HeatMap
 import pandas as pd
+import numpy as np
+import json
+import math
+import re
+from shapely.geometry import shape, mapping
+from shapely.ops import transform
 import streamlit.components.v1 as components
 
-# 페이지 기본 설정
-st.set_page_config(page_title="신규 업체 입점 검토", page_icon="📍", layout="wide")
+# ==========================================
+# 1. 페이지 및 모던 UI 설정
+# ==========================================
+st.set_page_config(page_title="신규 업체 입점 검토 및 상권 분석", page_icon="📍", layout="wide")
 
-# ==========================================
-# 🎨 [디자인 커스텀 CSS 주입] - 담백하고 모던한 스타일
-# ==========================================
 st.markdown("""
 <style>
-    /* 전체 배경색 및 폰트 변경 */
-    .stApp {
-        background-color: #F9FAFB;
-        font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    }
-    
-    /* 우측 상단 기본 메뉴 및 하단 워터마크 숨김 */
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* 제목 스타일링 */
-    h1 {
-        font-weight: 800;
-        color: #111827;
-        letter-spacing: -0.5px;
-        margin-bottom: 0rem;
-    }
-    
-    /* 부제목(캡션) 스타일링 */
-    .st-emotion-cache-16idsys p {
-        color: #6B7280;
-        font-size: 1.1rem;
-        margin-top: 0.5rem;
-    }
-    
-    /* 버튼 모던화 */
-    .stButton>button {
-        width: 100%;
-        border-radius: 8px;
-        font-weight: 600;
-        background-color: #2563EB;
-        color: white;
-        border: none;
-        padding: 0.6rem 1rem;
-        transition: all 0.2s ease-in-out;
-    }
-    .stButton>button:hover {
-        background-color: #1D4ED8;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        transform: translateY(-1px);
-    }
-    
-    /* 입력창 모던화 */
-    .stTextInput>div>div>input {
-        border-radius: 8px;
-        border: 1px solid #D1D5DB;
-        padding: 0.6rem;
-    }
+    .stApp { background-color: #F9FAFB; font-family: 'Pretendard', sans-serif; }
+    #MainMenu, header, footer {visibility: hidden;}
+    h1 { font-weight: 800; color: #111827; letter-spacing: -0.5px; margin-bottom: 0rem; }
+    .st-emotion-cache-16idsys p { color: #6B7280; font-size: 1.1rem; margin-top: 0.5rem; }
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: 600; background-color: #2563EB; color: white; border: none; padding: 0.6rem 1rem; transition: all 0.2s; }
+    .stButton>button:hover { background-color: #1D4ED8; transform: translateY(-1px); }
+    .stTextInput>div>div>input { border-radius: 8px; border: 1px solid #D1D5DB; padding: 0.6rem; }
 </style>
 """, unsafe_allow_html=True)
+
 # ==========================================
+# 2. 복잡한 좌표 변환 함수 (기존 로직 유지)
+# ==========================================
+def convert_coord(x, y, z=None):
+    if 120.0 <= x <= 135.0 and 30.0 <= y <= 45.0: return (x, y, z) if z is not None else (x, y)
+    if 30.0 <= x <= 45.0 and 120.0 <= y <= 135.0: return (y, x, z) if z is not None else (y, x)
+    if 1000000.0 <= x <= 2300000.0 and 500000.0 <= y <= 1500000.0: x, y = y, x
 
-st.title("📍 신규 업체 입점 검토")
-st.caption("신규 입점 희망 업체의 주소를 검색하여 기존 매장과의 거리를 한눈에 비교하고 입점을 검토하세요.")
+    if 500000.0 <= x <= 1500000.0 and 1000000.0 <= y <= 2300000.0:
+        a, f = 6378137.0, 1.0 / 298.257222101
+        b = a * (1.0 - f)
+        e2, e12 = (a**2 - b**2) / (a**2), (a**2 - b**2) / (b**2)
+        lat_0, lon_0 = math.radians(38.0), math.radians(127.5)
+        k_0, x_0, y_0 = 0.9996, 1000000.0, 2000000.0
+        x_adj, y_adj = x - x_0, y - y_0
+        M0 = a * ((1 - e2/4 - 3*e2**2/64 - 5*e2**3/256) * lat_0 - (3*e2/8 + 3*e2**2/32 + 45*e2**3/1024) * math.sin(2*lat_0) + (15*e2**2/256 + 45*e2**3/1024) * math.sin(4*lat_0) - (35*e2**3/3072) * math.sin(6*lat_0))
+        M = M0 + y_adj / k_0
+        mu = M / (a * (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256))
+        e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+        phi1 = mu + (3*e1/2 - 27*e1**3/32) * math.sin(2*mu) + (21*e1**2/16 - 55*e1**4/32) * math.sin(4*mu) + (151*e1**3/96) * math.sin(6*mu)
+        N1 = a / math.sqrt(1 - e2 * math.sin(phi1)**2)
+        T1, C1 = math.tan(phi1)**2, e12 * math.cos(phi1)**2
+        R1 = a * (1 - e2) / ((1 - e2 * math.sin(phi1)**2)**1.5)
+        D = x_adj / (N1 * k_0)
+        lat = phi1 - (N1 * math.tan(phi1) / R1) * (D**2/2 - (5 + 3*T1 + 10*C1 - 4*C1**2 - 9*e12) * D**4/24 + (61 + 90*T1 + 298*C1 + 45*T1**2 - 252*e12 - 3*C1**2) * D**6/720)
+        lon = lon_0 + (D - (1 + 2*T1 + C1) * D**3/6 + (5 - 2*C1 + 28*T1 - 3*C1**2 + 8*e12 + 24*T1**2) * D**5/120) / math.cos(phi1)
+        return (math.degrees(lon), math.degrees(lat), z) if z is not None else (math.degrees(lon), math.degrees(lat))
 
-# ------------------------------------------------------------------
-# [카카오 REST API 키 설정]
-DEFAULT_KAKAO_KEY = "" 
-# ------------------------------------------------------------------
+    return (x, y, z) if z is not None else (x, y)
 
-# 사이드바 설정 영역
+def _clean_str(val): return "" if pd.isna(val) else str(val).split('.')[0].strip()
+def _extract_dong_name(text):
+    if not text: return ""
+    m = re.search(r'([가-힣0-9]+(?:동|읍|면)(?:[0-9]*가)?)', str(text).strip())
+    return m.group(1) if m else str(text).strip()
+
+# ==========================================
+# 3. 데이터 로드 및 캐싱 (서버 과부하 방지)
+# ==========================================
+@st.cache_data
+def load_and_process_data():
+    # 1. 시공점 데이터 로드
+    df = pd.DataFrame()
+    for enc in ['utf-8', 'euc-kr', 'cp949', 'utf-16', 'latin-1']:
+        try:
+            df = pd.read_csv('시공점.csv', encoding=enc)
+            break
+        except: continue
+        
+    if not df.empty:
+        col_map = {'업체코드':'code', '업체명':'name', '위도':'lat', '경도':'lng', '월평균 예약 수':'avg_monthly_reservations', '월평균예약수':'avg_monthly_reservations', '재구매율':'repurchase_rate', '익일배송여부':'next_day_delivery', '활성 여부':'is_active', '활성여부':'is_active'}
+        df = df.rename(columns=col_map)
+        df['lat'] = pd.to_numeric(df.get('lat', []), errors='coerce')
+        df['lng'] = pd.to_numeric(df.get('lng', []), errors='coerce')
+        df = df.dropna(subset=['lat', 'lng']).reset_index(drop=True)
+        df['code'] = df.get('code', '없음').fillna('없음').astype(str)
+        df['name'] = df.get('name', '없음').fillna('없음').astype(str)
+        df['is_active'] = df.get('is_active', 'Y').fillna('Y').astype(str).str.upper()
+        df['next_day_delivery'] = df.get('next_day_delivery', 'N').fillna('N').astype(str).str.upper()
+        df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace('%', ''), errors='coerce').fillna(0)
+
+    # 2. 공간 및 인구 데이터 파싱
+    heat_points, simplified_geojson = [], None
+    try:
+        try: pop_df = pd.read_csv('인구.csv', encoding='utf-8')
+        except: pop_df = pd.read_csv('인구.csv', encoding='euc-kr')
+        
+        pop_col = [c for c in pop_df.columns if '인구' in c]
+        p_col = pop_col[0] if pop_col else pop_df.columns[1]
+        pop_df['population'] = pd.to_numeric(pop_df[p_col], errors='coerce').fillna(0)
+        pop_df['short_dong'] = pop_df.iloc[:, 0].apply(_extract_dong_name)
+        short_dong_map = pop_df.groupby('short_dong')['population'].sum().to_dict()
+
+        with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
+        features, raw_points = [], []
+        
+        for idx, feat in enumerate(gj['features']):
+            props = feat.get('properties', {})
+            geo_name = props.get('ADM_NM', props.get('EMD_NM', props.get('dong', '')))
+            short_geo_dong = _extract_dong_name(geo_name)
+            matched_pop = short_dong_map.get(short_geo_dong, 0)
+            
+            try:
+                raw_geom = shape(feat['geometry'])
+                wgs_geom = transform(convert_coord, raw_geom)
+                simple_geom = wgs_geom.simplify(0.001, preserve_topology=True)
+                centroid = wgs_geom.centroid
+                area_sq_km = max((raw_geom.area * 111.0 * 88.0) if 120.0 <= raw_geom.centroid.x <= 135.0 else (raw_geom.area / 1000000.0), 0.1)
+                pop_density = matched_pop / area_sq_km
+                
+                if matched_pop > 0: raw_points.append({'lat': centroid.y, 'lng': centroid.x, 'density': pop_density})
+                features.append({'type': 'Feature', 'properties': {'ADM_NM': geo_name, 'population': int(matched_pop), 'area_km2': round(area_sq_km, 2), 'density': int(pop_density)}, 'geometry': mapping(simple_geom)})
+            except: continue
+            
+        if raw_points:
+            density_cutoff = np.percentile([p['density'] for p in raw_points], 50)
+            heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] >= density_cutoff]
+        simplified_geojson = {'type': 'FeatureCollection', 'features': features}
+    except Exception as e:
+        print("공간 데이터 로드 실패:", e)
+        
+    return df, heat_points, simplified_geojson
+
+with st.spinner("빅데이터 연산 및 지도 최적화 중입니다... (최초 1회만 소요)"):
+    stores_df, heat_points, geojson_data = load_and_process_data()
+
+# ==========================================
+# 4. 앱 UI 및 사이드바
+# ==========================================
+st.title("📍 상권 기반 신규 입점 검토 시스템")
+st.caption("인구 밀집 히트맵을 참고하여 신규 주소를 검색하고 기존 매장과의 상권을 비교하세요.")
+
 with st.sidebar:
     st.markdown("### ⚙️ 설정")
-    user_kakao_key = st.text_input("카카오 REST API 키", value=DEFAULT_KAKAO_KEY, type="password")
+    user_kakao_key = st.text_input("카카오 REST API 키", value="", type="password")
     st.markdown("---")
-    radius_km = st.slider("🔴 입점 검토 반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
-
-def get_clean_pin(color_hex, is_search=False):
-    w, h = (20, 28) if is_search else (12, 18)
-    svg = f'''
-    <div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;">
-        <svg width="{w}" height="{h}" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="{color_hex}"/>
-        </svg>
-    </div>
-    '''
-    return svg
-
-@st.cache_data
-def load_stores():
-    try:
-        df = pd.read_csv('stores.csv', encoding='utf-8')
-    except UnicodeDecodeError:
-        df = pd.read_csv('stores.csv', encoding='cp949')
-        
-    df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
-    df['lng'] = pd.to_numeric(df['lng'], errors='coerce')
-    return df.dropna(subset=['lat', 'lng'])
-
-try:
-    stores_df = load_stores()
-    st.sidebar.success(f"✅ 연동된 기존 매장: {len(stores_df)}개")
-except Exception as e:
-    st.sidebar.error("데이터를 불러올 수 없습니다.")
-    stores_df = pd.DataFrame(columns=['name', 'lat', 'lng'])
+    st.markdown("**🔴 신규 입점 검토 반경**")
+    radius_km = st.slider("반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
+    st.success(f"✅ 연동된 기존 시공점: {len(stores_df)}개")
+    if heat_points: st.info("🔥 인구 밀집 상권 히트맵 로드됨")
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
-    url_addr = f"https://dapi.kakao.com/v2/local/search/address.json?query={address}"
-    res = requests.get(url_addr, headers=headers)
-    if res.status_code == 200 and res.json()['documents']:
-        doc = res.json()['documents'][0]
-        return float(doc['y']), float(doc['x']), doc.get('address_name', address)
-        
-    url_kw = f"https://dapi.kakao.com/v2/local/search/keyword.json?query={address}"
-    res_kw = requests.get(url_kw, headers=headers)
-    if res_kw.status_code == 200 and res_kw.json()['documents']:
-        doc = res_kw.json()['documents'][0]
-        return float(doc['y']), float(doc['x']), doc.get('place_name', address)
-        
+    for search_type in ['address', 'keyword']:
+        res = requests.get(f"https://dapi.kakao.com/v2/local/search/{search_type}.json?query={address}", headers=headers)
+        if res.status_code == 200 and res.json()['documents']:
+            doc = res.json()['documents'][0]
+            return float(doc['y']), float(doc['x']), doc.get('address_name', doc.get('place_name', address))
     return None, None, None
 
 search_col1, search_col2 = st.columns([3, 1])
-with search_col1:
-    address = st.text_input("검색할 주소를 입력하세요", placeholder="예: 성남시 중원구 희망로 415", label_visibility="collapsed")
-with search_col2:
-    search_clicked = st.button("위치 검토")
+with search_col1: address = st.text_input("신규 검토 주소 입력", placeholder="예: 성남시 중원구 희망로 415", label_visibility="collapsed")
+with search_col2: search_clicked = st.button("입점 상권 검토")
 
 search_lat, search_lng, found_name = None, None, None
 
 if search_clicked:
-    if not user_kakao_key:
-        st.error("사이드바에 카카오 API 키를 입력해주세요.")
+    if not user_kakao_key: st.error("사이드바에 카카오 API 키를 입력해주세요.")
     elif address.strip():
-        with st.spinner("위치 데이터를 분석 중입니다..."):
+        with st.spinner("위치 및 상권 데이터 분석 중..."):
             search_lat, search_lng, found_name = get_kakao_coords(address, user_kakao_key)
-            
             if search_lat and search_lng:
-                st.success(f"📍 '{found_name}' 위치를 찾았습니다.")
-                
-                coord_col1, coord_col2 = st.columns(2)
-                with coord_col1:
-                    st.markdown("**위도 (Latitude)**")
-                    st.code(f"{search_lat:.6f}", language="text")
-                with coord_col2:
-                    st.markdown("**경도 (Longitude)**")
-                    st.code(f"{search_lng:.6f}", language="text")
-            else:
-                st.error("주소를 찾을 수 없습니다. 다시 확인해 주세요.")
+                st.success(f"📍 '{found_name}' 위치 탐색 성공")
+                c1, c2 = st.columns(2)
+                with c1: st.markdown("**위도**"); st.code(f"{search_lat:.6f}", language="text")
+                with c2: st.markdown("**경도**"); st.code(f"{search_lng:.6f}", language="text")
+            else: st.error("주소를 찾을 수 없습니다.")
 
+# ==========================================
+# 5. 지도 생성 및 레이어 병합
+# ==========================================
 st.markdown("<br>", unsafe_allow_html=True)
-st.markdown(f"**🗺️ 입점 위치 비교 지도** (🔴 검토 위치 반경 {radius_km}km / 🔵 기존 매장)")
 
-if search_lat and search_lng:
-    center_lat, center_lng = search_lat, search_lng
-    zoom_level = 14 if radius_km <= 2 else (13 if radius_km <= 5 else 12)
-elif not stores_df.empty:
-    center_lat, center_lng, zoom_level = stores_df['lat'].mean(), stores_df['lng'].mean(), 11
-else:
-    center_lat, center_lng, zoom_level = 37.5665, 126.9780, 11
+# 지도 중심 설정
+center_lat = search_lat if search_lat else (stores_df['lat'].mean() if not stores_df.empty else 37.5665)
+center_lng = search_lng if search_lng else (stores_df['lng'].mean() if not stores_df.empty else 126.9780)
+zoom_level = 14 if search_lat and radius_km <= 2 else (13 if search_lat and radius_km <= 5 else 11)
 
-m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level)
+m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level, tiles='OpenStreetMap')
 
+# [기존 기능 1] 인구 밀집 히트맵 레이어
+if heat_points:
+    HeatMap(heat_points, name='🔥 주요 인구 밀집 스팟', radius=14, blur=10, min_opacity=0.35,
+            gradient={0.3: '#00E676', 0.6: '#FFEB3B', 0.85: '#FF9800', 1.0: '#D50000'}, show=True).add_to(m)
+
+# [기존 기능 2] 행정동 경계선 레이어
+if geojson_data:
+    folium.GeoJson(
+        geojson_data, name='🗺️ 행정동 경계선 (인구/면적)',
+        style_function=lambda f: {'fillColor': 'transparent', 'color': '#777777', 'weight': 0.5, 'fillOpacity': 0.0},
+        highlight_function=lambda f: {'color': '#000000', 'weight': 1.8, 'fillOpacity': 0.1},
+        tooltip=folium.GeoJsonTooltip(fields=['ADM_NM', 'population', 'density'], aliases=['행정동:', '인구수:', '인구밀도:'], localize=True),
+        show=False # 초기에는 숨김 처리 (우측 상단 레이어 툴에서 켤 수 있음)
+    ).add_to(m)
+
+# [기존 기능 3] 반경별 시공점 커버리지 레이어 (사용자가 만든 3, 5, 10, 15km 레이어)
+radii = [3, 5, 10, 15]
+for r_km in radii:
+    is_default = (r_km == 5) # 기본 5km만 켜둠
+    radius_layer = folium.FeatureGroup(name=f'🎯 기존 시공점 커버리지 ({r_km}km)', show=is_default)
+    for _, row in stores_df.iterrows():
+        is_active = row['is_active'] == 'Y'
+        folium.Circle(
+            location=[row['lat'], row['lng']], radius=r_km * 1000,
+            color='#0288D1' if is_active else '#9E9E9E', fill=True, 
+            fillColor='#B3E5FC' if is_active else '#E0E0E0', fillOpacity=0.1, weight=1
+        ).add_to(radius_layer)
+    radius_layer.add_to(m)
+
+# [기존 기능 4] 개별 매장 마커 및 상세 팝업 레이어
+shop_layer = folium.FeatureGroup(name=f'📍 전체 매장 마커', show=True)
 for _, row in stores_df.iterrows():
-    folium.Marker(
-        location=[row['lat'], row['lng']],
-        popup=f"<b>{row['name']}</b>",
-        tooltip=f"{row['name']}",
-        icon=folium.DivIcon(
-            html=get_clean_pin('#38BDF8', is_search=False),
-            icon_size=(12, 18),
-            icon_anchor=(6, 18)
-        )
-    ).add_to(m)
+    is_active, is_next_day = row['is_active'] == 'Y', row['next_day_delivery'] == 'Y'
+    color = '#0D47A1' if is_next_day else '#0288D1' if is_active else '#9E9E9E'
+    
+    popup_html = f"""
+    <div style="font-family:'Malgun Gothic',sans-serif;min-width:200px;">
+        <h4 style="margin:0 0 8px 0;border-bottom:2px solid {color};">📍 {row['name']}</h4>
+        <p style="margin:3px 0;font-size:12px;"><b>업체코드:</b> {row['code']}</p>
+        <p style="margin:3px 0;font-size:12px;"><b>월 평균 예약:</b> {row['avg_monthly_reservations']:,.0f}건</p>
+        <p style="margin:3px 0;font-size:12px;"><b>재구매율:</b> {row['repurchase_rate']:.1f}%</p>
+        <p style="margin:3px 0;font-size:12px;"><b>상태:</b> {'활성(Y)' if is_active else '비활성(N)'}</p>
+    </div>
+    """
+    folium.CircleMarker(
+        location=[row['lat'], row['lng']], radius=4.5, popup=folium.Popup(popup_html, max_width=250),
+        color='#FFFFFF', fill=True, fillColor=color, fillOpacity=0.95, weight=1.0,
+        tooltip=f"{row['name']}"
+    ).add_to(shop_layer)
+shop_layer.add_to(m)
 
+# [신규 기능] 카카오 검색 위치 동적 마커 및 반경 원 (가장 위에 띄움)
 if search_lat and search_lng:
+    search_layer = folium.FeatureGroup(name=f'🚨 신규 입점 검토 위치', show=True)
     folium.Circle(
-        location=[search_lat, search_lng],
-        radius=radius_km * 1000,
-        color='#F87171',
-        fill=True,
-        fill_color='#F87171',
-        fill_opacity=0.15,
-        weight=1.5
-    ).add_to(m)
+        location=[search_lat, search_lng], radius=radius_km * 1000,
+        color='#DC2626', fill=True, fillColor='#EF4444', fillOpacity=0.2, weight=2.5
+    ).add_to(search_layer)
 
+    svg_pin = '''<div class="custom-pin-icon" style="transition: transform 0.15s ease-out; transform-origin: bottom center;"><svg width="24" height="34" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg"><path d="M12 0C5.37 0 0 5.37 0 12C0 21 12 34 12 34C12 34 24 21 24 12C24 5.37 18.63 0 12 0Z" fill="#DC2626"/></svg></div>'''
     folium.Marker(
-        location=[search_lat, search_lng],
-        popup=f"<b>검토 위치</b><br>{address}",
-        tooltip=f"{address}",
-        icon=folium.DivIcon(
-            html=get_clean_pin('#F87171', is_search=True),
-            icon_size=(20, 28),
-            icon_anchor=(10, 28)
-        )
-    ).add_to(m)
+        location=[search_lat, search_lng], popup=f"<b>신규 검토 위치</b><br>{address}", tooltip=f"검토 반경: {radius_km}km",
+        icon=folium.DivIcon(html=svg_pin, icon_size=(24, 34), icon_anchor=(12, 34))
+    ).add_to(search_layer)
+    search_layer.add_to(m)
 
+# 레이어 컨트롤 추가 (체크박스로 레이어 켜고 끄기 가능)
+folium.LayerControl(collapsed=False, position='topright').add_to(m)
+
+# 신규 마커 줌 연동 스크립트
 zoom_script = """
 <script>
-document.addEventListener("DOMContentLoaded", function() {
-    setTimeout(function() {
-        var map_keys = Object.keys(window).filter(k => k.startsWith('map_'));
-        if (map_keys.length > 0) {
-            var myMap = window[map_keys[0]];
-            
-            function adjustMarkerScale() {
-                var zoom = myMap.getZoom();
-                var scale = Math.max(0.4, Math.min(3.0, 1.0 + (zoom - 11) * 0.25));
-                var pins = document.querySelectorAll('.custom-pin-icon');
-                pins.forEach(function(pin) {
-                    pin.style.transform = 'scale(' + scale + ')';
-                });
-            }
-            
-            myMap.on('zoomend', adjustMarkerScale);
-            adjustMarkerScale();
+document.addEventListener("DOMContentLoaded", function() { setTimeout(function() {
+    var map_keys = Object.keys(window).filter(k => k.startsWith('map_'));
+    if (map_keys.length > 0) {
+        var myMap = window[map_keys[0]];
+        function adjustMarkerScale() {
+            var zoom = myMap.getZoom();
+            var scale = Math.max(0.4, Math.min(3.0, 1.0 + (zoom - 11) * 0.25));
+            document.querySelectorAll('.custom-pin-icon').forEach(p => p.style.transform = 'scale(' + scale + ')');
         }
-    }, 500);
-});
+        myMap.on('zoomend', adjustMarkerScale); adjustMarkerScale();
+    }
+}, 500);});
 </script>
 """
 m.get_root().html.add_child(folium.Element(zoom_script))
 
-components.html(m.get_root().render(), height=600)
+components.html(m.get_root().render(), height=650)
