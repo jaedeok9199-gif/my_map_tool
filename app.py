@@ -135,7 +135,7 @@ boundary_geojson, all_density_points = load_population_boundary()
 # ==========================================
 # 4. 앱 UI 및 사이드바 설정
 # ==========================================
-st.title("정비소 공급망 지도")
+st.title("엔진오일 공급망 지도")
 st.caption("신규 주소를 검색하고 기존 매장과의 커버리지 및 상권을 비교하세요.")
 
 with st.sidebar:
