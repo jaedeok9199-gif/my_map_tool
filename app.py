@@ -109,7 +109,7 @@ def load_population_boundary():
     pop_df['population'] = pd.to_numeric(pop_df['population'], errors='coerce').fillna(0)
     pop_map = pop_df.set_index('adm_cd')['population'].to_dict()
 
-    heat_points = []
+    all_points = []  # (lat, lng, density) - population > 0인 전체 지점 (필터 전)
     for feat in geo['features']:
         props = feat.get('properties', {})
         adm_cd = str(props.get('ADM_CD', '')).strip()
@@ -124,13 +124,13 @@ def load_population_boundary():
             from shapely.geometry import shape
             centroid = shape(feat['geometry']).centroid
             if population > 0:
-                heat_points.append([centroid.y, centroid.x, density])
+                all_points.append((centroid.y, centroid.x, density))
         except Exception:
             pass
 
-    return geo, heat_points
+    return geo, all_points
 
-boundary_geojson, heat_points = load_population_boundary()
+boundary_geojson, all_density_points = load_population_boundary()
 
 # ==========================================
 # 4. 앱 UI 및 사이드바 설정
@@ -148,11 +148,22 @@ with st.sidebar:
     st.markdown("**🔥 인구 히트맵**")
     show_heatmap = st.checkbox("인구 밀도 히트맵 표시", value=True)
     show_boundary = st.checkbox("행정동 경계선 표시", value=True)
+    top_pct = st.slider(
+        "히트맵 표시 기준 (인구밀도 상위 %)", min_value=5, max_value=100, value=30, step=5,
+        help="값을 낮출수록 밀도가 아주 높은 지역만 남고, 낮은 지역(연두색)은 사라집니다."
+    )
     st.success(f"✅ 연동된 기존 시공점: {len(stores_df)}개")
     if boundary_geojson:
-        st.info(f"📊 행정동 {len(boundary_geojson['features'])}개 / 히트맵 포인트 {len(heat_points)}개")
+        st.info(f"📊 행정동 {len(boundary_geojson['features'])}개")
     else:
         st.warning("⚠️ 행정동경계_simplified.geojson 파일을 찾을 수 없습니다.")
+
+# 인구밀도 상위 N% 지점만 히트맵 대상으로 필터링 (연두색 배경 노이즈 제거)
+heat_points = []
+if all_density_points:
+    densities = [p[2] for p in all_density_points]
+    cutoff = pd.Series(densities).quantile(1 - top_pct / 100)
+    heat_points = [[lat, lng, d] for (lat, lng, d) in all_density_points if d >= cutoff]
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
