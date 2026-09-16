@@ -11,9 +11,7 @@ from shapely.geometry import shape, mapping
 from shapely.ops import transform
 import streamlit.components.v1 as components
 
-# ==========================================
 # 1. 페이지 및 모던 UI 설정
-# ==========================================
 st.set_page_config(page_title="신규 업체 입점 검토 및 상권 분석", page_icon="📍", layout="wide")
 
 st.markdown("""
@@ -28,9 +26,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. 좌표 변환 및 유틸리티 함수
-# ==========================================
+# 2. UTM-K(TM) -> WGS84 좌표 변환 함수
 def convert_coord(x, y, z=None):
     if 120.0 <= x <= 135.0 and 30.0 <= y <= 45.0: return (x, y, z) if z is not None else (x, y)
     if 30.0 <= x <= 45.0 and 120.0 <= y <= 135.0: return (y, x, z) if z is not None else (y, x)
@@ -58,22 +54,6 @@ def convert_coord(x, y, z=None):
 
     return (x, y, z) if z is not None else (x, y)
 
-def _clean_str(val):
-    if pd.isna(val): return ""
-    s = str(val).split('.')[0].strip()
-    return s[:8] if len(s) >= 8 else s # 8자리 코드 표준화
-
-def _extract_dong_name(text):
-    if not text or pd.isna(text): return ""
-    text = str(text).split('(')[0].strip()
-    text = text.replace('제', '')
-    tokens = text.split()
-    for t in reversed(tokens):
-        if t.endswith('동') or t.endswith('읍') or t.endswith('면'):
-            return t
-    m = re.search(r'([가-힣0-9]+(?:동|읍|면))', text)
-    return m.group(1) if m else text.replace(" ", "")
-
 def get_clean_pin(color_hex, is_search=False):
     w, h = (20, 28) if is_search else (12, 18)
     return f'''
@@ -84,28 +64,25 @@ def get_clean_pin(color_hex, is_search=False):
     </div>
     '''
 
-# ==========================================
-# 3. 데이터 로드 및 캐싱 (코드+이름 복합 매칭)
-# ==========================================
+# 3. 정밀 정밀 데이터 로드 및 매칭
 @st.cache_data
 def load_and_process_data():
-    # [1] 시공점 CSV 로드
     df = pd.DataFrame()
-    for enc in ['utf-8', 'euc-kr', 'cp949', 'utf-16', 'latin-1', 'utf-8-sig']:
+    for enc in ['utf-8', 'euc-kr', 'cp949', 'latin-1']:
         try:
             df = pd.read_csv('시공점.csv', encoding=enc)
-            break
+            if not df.empty: break
         except: continue
         
     if df.empty:
         for enc in ['utf-8', 'euc-kr', 'cp949']:
             try:
                 df = pd.read_csv('stores.csv', encoding=enc)
-                break
+                if not df.empty: break
             except: continue
 
     if not df.empty:
-        col_map = {'업체코드':'code', '업체명':'name', '위도':'lat', '경도':'lng', '월평균 예약 수':'avg_monthly_reservations', '월평균예약수':'avg_monthly_reservations', '재구매율':'repurchase_rate', '익일배송여부':'next_day_delivery', '활성 여부':'is_active', '활성여부':'is_active'}
+        col_map = {'업체코드':'code', '업체명':'name', '위도':'lat', '경도':'lng', '월평균 예약 수':'avg_monthly_reservations', '월평균예약수':'avg_monthly_reservations', '재구매율':'repurchase_rate'}
         df = df.rename(columns=col_map)
         df['lat'] = pd.to_numeric(df.get('lat', []), errors='coerce')
         df['lng'] = pd.to_numeric(df.get('lng', []), errors='coerce')
@@ -115,82 +92,60 @@ def load_and_process_data():
         df['avg_monthly_reservations'] = pd.to_numeric(df.get('avg_monthly_reservations', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
         df['repurchase_rate'] = pd.to_numeric(df.get('repurchase_rate', 0).astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
 
-    # [2] 인구 CSV & GeoJSON 공간 매칭
     heat_points, simplified_geojson, matched_count = [], None, 0
-    debug_msg = ""
     try:
         pop_df = pd.DataFrame()
         for enc in ['utf-8', 'utf-8-sig', 'euc-kr', 'cp949']:
             try:
                 pop_df = pd.read_csv('인구.csv', encoding=enc)
-                break
+                if not pop_df.empty: break
             except: continue
             
         if not pop_df.empty:
-            pop_col = [c for c in pop_df.columns if '인구' in c]
-            code_col = [c for c in pop_df.columns if '코드' in c or 'cd' in c.lower()]
-            name_col = [c for c in pop_df.columns if any(k in c for k in ['동', '명', '이름', '지역', '행정'])]
+            # 스크린샷 기반 컬럼 자동 탐지 (행정동코드 / 인구수)
+            code_c = next((c for c in pop_df.columns if '코드' in c or 'cd' in c.lower()), pop_df.columns[0])
+            pop_c = next((c for c in pop_df.columns if '인구' in c or 'pop' in c.lower()), pop_df.columns[1])
 
-            p_col = pop_col[0] if pop_col else pop_df.columns[1]
-            c_col = code_col[0] if code_col else None
-            n_col = name_col[0] if name_col else None
+            pop_df['code_clean'] = pop_df[code_c].astype(str).str.replace(r'[^0-9]', '', regex=True)
+            pop_df['pop_num'] = pd.to_numeric(pop_df[pop_c].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
 
-            pop_df['population'] = pd.to_numeric(pop_df[p_col].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce').fillna(0)
-            
-            # 매칭 딕셔너리 구축 (코드 / 풀네임 / 단축명)
-            code_map = pop_df.groupby(pop_df[c_col].apply(_clean_str))['population'].sum().to_dict() if c_col else {}
-            
-            if n_col:
-                pop_df['name_clean'] = pop_df[n_col].astype(str).str.split('(').str[0].str.replace(' ', '').str.replace('제', '').str.strip()
-                pop_df['short_dong'] = pop_df[n_col].astype(str).apply(_extract_dong_name)
-                full_name_map = pop_df.groupby('name_clean')['population'].sum().to_dict()
-                short_dong_map = pop_df.groupby('short_dong')['population'].sum().to_dict()
-            else:
-                full_name_map, short_dong_map = {}, {}
+            code_map_full = pop_df.groupby('code_clean')['pop_num'].sum().to_dict()
+            code_map_7 = pop_df.groupby(pop_df['code_clean'].str[:7])['pop_num'].sum().to_dict()
 
-            with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
+            # json / geojson 확장자 자동 선택
+            gj_filename = '행정동경계.json'
+            try:
+                with open(gj_filename, 'r', encoding='utf-8') as f: gj = json.load(f)
+            except:
+                with open('행정동경계.geojson', 'r', encoding='utf-8') as f: gj = json.load(f)
+
             features, raw_points = [], []
             
             for idx, feat in enumerate(gj.get('features', [])):
                 props = feat.get('properties', {})
                 
-                # 코드 추출
-                geo_code = ""
-                for k in ['ADM_CD', 'adm_cd', 'ADM_DR_CD', 'EMD_CD', 'code', 'CODE']:
-                    if k in props and props[k]:
-                        geo_code = _clean_str(props[k])
-                        break
-                        
-                # 이름 추출
-                geo_name = ""
-                for k in ['ADM_NM', 'adm_nm', 'EMD_NM', 'EMD_KOR_NM', 'dong', 'name', 'NAME']:
-                    if k in props and props[k]:
-                        geo_name = str(props[k]).strip()
-                        break
-                        
-                geo_name_clean = geo_name.split('(')[0].replace(' ', '').replace('제', '')
-                short_geo_dong = _extract_dong_name(geo_name)
+                # 속성 내 숫자 코드 정밀 탐색
+                digits = []
+                for k, v in props.items():
+                    d = re.sub(r'[^0-9]', '', str(v))
+                    if len(d) >= 5: digits.append(d)
                 
-                # 4단계 멀티 매칭 (코드 -> 풀네임 -> 단축명 -> 부분포함)
                 matched_pop = 0
-                if geo_code and geo_code in code_map:
-                    matched_pop = code_map[geo_code]
-                elif geo_name_clean in full_name_map:
-                    matched_pop = full_name_map[geo_name_clean]
-                elif short_geo_dong in short_dong_map:
-                    matched_pop = short_dong_map[short_geo_dong]
-                else:
-                    for k, v in short_dong_map.items():
-                        if k and len(k) > 1 and (k in short_geo_dong or short_geo_dong in k):
-                            matched_pop = v
-                            break
-                            
+                for d in digits:
+                    if d in code_map_full:
+                        matched_pop = code_map_full[d]
+                        break
+                    elif d[:7] in code_map_7:
+                        matched_pop = code_map_7[d[:7]]
+                        break
+                        
                 if matched_pop > 0:
                     matched_count += 1
-                    
+
                 try:
                     raw_geom = shape(feat['geometry'])
-                    wgs_geom = transform(convert_coord, raw_geom)
+                    # 좌표계 자동 정밀 변환
+                    wgs_geom = transform(convert_coord, raw_geom) if not (120.0 <= raw_geom.centroid.x <= 135.0) else raw_geom
                     simple_geom = wgs_geom.simplify(0.001, preserve_topology=True)
                     centroid = wgs_geom.centroid
                     
@@ -200,10 +155,11 @@ def load_and_process_data():
                     if matched_pop > 0: 
                         raw_points.append({'lat': centroid.y, 'lng': centroid.x, 'density': pop_density})
                         
+                    geo_title = str(props.get('ADM_NM', props.get('EMD_NM', f'행정동_{idx}')))
                     features.append({
                         'type': 'Feature', 
                         'properties': {
-                            'ADM_NM': geo_name if geo_name else "알수없음", 
+                            'ADM_NM': geo_title, 
                             'population': int(matched_pop), 
                             'area_km2': round(area_sq_km, 2), 
                             'density': int(pop_density)
@@ -215,22 +171,20 @@ def load_and_process_data():
                     
             if raw_points:
                 densities = [p['density'] for p in raw_points]
-                density_cutoff = np.percentile(densities, 40) # 상위 60% 밀집지역 시각화
+                density_cutoff = np.percentile(densities, 25)
                 heat_points = [[p['lat'], p['lng'], p['density']] for p in raw_points if p['density'] >= density_cutoff]
             
             simplified_geojson = {'type': 'FeatureCollection', 'features': features}
     except Exception as e:
-        debug_msg = str(e)
+        print("공간 연산 예외 발생:", e)
         
-    return df, heat_points, simplified_geojson, matched_count, debug_msg
+    return df, heat_points, simplified_geojson, matched_count
 
 with st.spinner("빅데이터 연산 및 지도 최적화 중입니다..."):
-    stores_df, heat_points, geojson_data, matched_count, debug_msg = load_and_process_data()
+    stores_df, heat_points, geojson_data, matched_count = load_and_process_data()
 
-# ==========================================
-# 4. 앱 UI 및 사이드바
-# ==========================================
-st.title("📍 상권 기반 신규 입점 검토 시스템")
+# 4. UI 레이아웃
+st.title("신규 입점 검토 시스템")
 st.caption("인구 밀집 히트맵을 참고하여 신규 주소를 검색하고 기존 매장과의 상권을 비교하세요.")
 
 with st.sidebar:
@@ -244,9 +198,7 @@ with st.sidebar:
     if matched_count > 0: 
         st.info(f"🔥 행정동 인구 매칭 성공: {matched_count}곳")
     else:
-        st.warning("⚠️ 인구 데이터 매칭 실패")
-        if debug_msg:
-            st.caption(f"오류 원인: {debug_msg}")
+        st.warning("⚠️ 인구 데이터 연동 확인 중")
 
 def get_kakao_coords(address, api_key):
     headers = {"Authorization": f"KakaoAK {api_key}"}
@@ -275,9 +227,7 @@ if search_clicked:
                 with c2: st.markdown("**경도**"); st.code(f"{search_lng:.6f}", language="text")
             else: st.error("주소를 찾을 수 없습니다.")
 
-# ==========================================
-# 5. 지도 생성 및 레이어 병합
-# ==========================================
+# 5. 지도 렌더링
 st.markdown("<br>", unsafe_allow_html=True)
 
 center_lat = search_lat if search_lat else (stores_df['lat'].mean() if not stores_df.empty else 37.5665)
@@ -286,12 +236,10 @@ zoom_level = 14 if search_lat and radius_km <= 2 else (13 if search_lat and radi
 
 m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom_level, tiles='OpenStreetMap')
 
-# 히트맵
 if heat_points:
     HeatMap(heat_points, name='🔥 주요 인구 밀집 스팟', radius=15, blur=12, min_opacity=0.3,
             gradient={0.3: '#00E676', 0.6: '#FFEB3B', 0.85: '#FF9800', 1.0: '#D50000'}, show=True).add_to(m)
 
-# 행정동 경계
 if geojson_data:
     folium.GeoJson(
         geojson_data, name='🗺️ 행정동 경계선 (인구/면적)',
@@ -301,7 +249,6 @@ if geojson_data:
         show=False
     ).add_to(m)
 
-# 커버리지 반경 원
 radii = [3, 5, 10, 15]
 for r_km in radii:
     is_default = (r_km == 5)
@@ -315,7 +262,6 @@ for r_km in radii:
         ).add_to(radius_layer)
     radius_layer.add_to(m)
 
-# 업체 마커
 shop_layer = folium.FeatureGroup(name=f'📍 전체 매장 마커', show=True)
 for _, row in stores_df.iterrows():
     popup_html = f"""
@@ -344,7 +290,6 @@ for _, row in stores_df.iterrows():
     ).add_to(shop_layer)
 shop_layer.add_to(m)
 
-# 검색 위치 마커
 if search_lat and search_lng:
     search_layer = folium.FeatureGroup(name=f'🚨 신규 입점 검토 위치', show=True)
     folium.Circle(
