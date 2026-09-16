@@ -4,15 +4,15 @@ import folium
 import pandas as pd
 import streamlit.components.v1 as components
 
-# 페이지 기본 설정 (가장 먼저 호출되어야 함)
-st.set_page_config(page_title="위치 비교 툴", page_icon="📍", layout="wide")
+# 페이지 기본 설정
+st.set_page_config(page_title="신규 업체 입점 검토", page_icon="📍", layout="wide")
 
 # ==========================================
 # 🎨 [디자인 커스텀 CSS 주입] - 담백하고 모던한 스타일
 # ==========================================
 st.markdown("""
 <style>
-    /* 전체 배경색 및 폰트 변경 (Pretendard 등 모던 폰트 적용) */
+    /* 전체 배경색 및 폰트 변경 */
     .stApp {
         background-color: #F9FAFB;
         font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -65,8 +65,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 # ==========================================
 
-st.title("📍 매장 위치 탐색기")
-st.caption("주소를 검색하고 주변 매장과의 거리를 한눈에 비교하세요.")
+st.title("📍 신규 업체 입점 검토")
+st.caption("신규 입점 희망 업체의 주소를 검색하여 기존 매장과의 거리를 한눈에 비교하고 입점을 검토하세요.")
 
 # ------------------------------------------------------------------
 # [카카오 REST API 키 설정]
@@ -78,7 +78,7 @@ with st.sidebar:
     st.markdown("### ⚙️ 설정")
     user_kakao_key = st.text_input("카카오 REST API 키", value=DEFAULT_KAKAO_KEY, type="password")
     st.markdown("---")
-    radius_km = st.slider("🔴 반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
+    radius_km = st.slider("🔴 입점 검토 반경 범위 (km)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
 
 def get_clean_pin(color_hex, is_search=False):
     w, h = (20, 28) if is_search else (12, 18)
@@ -104,7 +104,7 @@ def load_stores():
 
 try:
     stores_df = load_stores()
-    st.sidebar.success(f"✅ 연동된 매장: {len(stores_df)}개")
+    st.sidebar.success(f"✅ 연동된 기존 매장: {len(stores_df)}개")
 except Exception as e:
     st.sidebar.error("데이터를 불러올 수 없습니다.")
     stores_df = pd.DataFrame(columns=['name', 'lat', 'lng'])
@@ -125,12 +125,11 @@ def get_kakao_coords(address, api_key):
         
     return None, None, None
 
-# 레이아웃 분리: 검색창과 버튼을 한 줄에 깔끔하게 배치
 search_col1, search_col2 = st.columns([3, 1])
 with search_col1:
     address = st.text_input("검색할 주소를 입력하세요", placeholder="예: 성남시 중원구 희망로 415", label_visibility="collapsed")
 with search_col2:
-    search_clicked = st.button("위치 탐색")
+    search_clicked = st.button("위치 검토")
 
 search_lat, search_lng, found_name = None, None, None
 
@@ -144,7 +143,6 @@ if search_clicked:
             if search_lat and search_lng:
                 st.success(f"📍 '{found_name}' 위치를 찾았습니다.")
                 
-                # [클릭 복사 기능 적용 구역] - 코드를 담백하게 표시하고 우측 상단 복사 아이콘 제공
                 coord_col1, coord_col2 = st.columns(2)
                 with coord_col1:
                     st.markdown("**위도 (Latitude)**")
@@ -156,7 +154,7 @@ if search_clicked:
                 st.error("주소를 찾을 수 없습니다. 다시 확인해 주세요.")
 
 st.markdown("<br>", unsafe_allow_html=True)
-st.markdown(f"**🗺️ 위치 지도** (🔴 검색 위치 반경 {radius_km}km / 🔵 기존 매장)")
+st.markdown(f"**🗺️ 입점 위치 비교 지도** (🔴 검토 위치 반경 {radius_km}km / 🔵 기존 매장)")
 
 if search_lat and search_lng:
     center_lat, center_lng = search_lat, search_lng
@@ -193,7 +191,7 @@ if search_lat and search_lng:
 
     folium.Marker(
         location=[search_lat, search_lng],
-        popup=f"<b>검색 위치</b><br>{address}",
+        popup=f"<b>검토 위치</b><br>{address}",
         tooltip=f"{address}",
         icon=folium.DivIcon(
             html=get_clean_pin('#F87171', is_search=True),
@@ -228,5 +226,4 @@ document.addEventListener("DOMContentLoaded", function() {
 """
 m.get_root().html.add_child(folium.Element(zoom_script))
 
-# 지도를 카드 형태의 그림자 안에 넣어 모던하게 연출
 components.html(m.get_root().render(), height=600)
